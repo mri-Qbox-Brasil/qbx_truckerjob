@@ -71,7 +71,7 @@ local function RemoveTruckerBlips()
     end
 end
 
-local function MenuGarage()
+local function OpenMenuGarage()
     local truckMenu = {}
     for k in pairs(Config.Vehicles) do
         truckMenu[#truckMenu + 1] = {
@@ -143,8 +143,13 @@ local function CreateZone(type, number)
             }
         })
     else
-        CreateThread(function()
-            local function enterZone()
+        local boxZones = lib.zones.box({
+            name = boxName,
+            coords = coords,
+            size = size,
+            rotation = rotation,
+            debug = debug,
+            onEnter = function()
                 if type == 'main' then
                     TriggerEvent('qb-truckerjob:client:PaySlip')
                 elseif type == 'vehicle' then
@@ -157,8 +162,8 @@ local function CreateZone(type, number)
                     ShowMarker(true)
                     SetDelivering(true)
                 end
-            end
-            local function exitZone()
+            end,
+            onExit = function()
                 if type == 'vehicle' then
                     ShowMarker(false)
                 elseif type == 'stores' then
@@ -166,19 +171,10 @@ local function CreateZone(type, number)
                     SetDelivering(false)
                 end
             end
-            local boxZones = lib.zones.box({
-                name = boxName,
-                coords = coords,
-                size = size,
-                rotation = rotation,
-                debug = debug,
-                onEnter = enterZone,
-                onExit = exitZone
-            })
-            if type == 'stores' then
-                CurrentLocation.zoneCombo = boxZones
-            end
-        end)
+        })
+        if type == 'stores' then
+            CurrentLocation.zoneCombo = boxZones
+        end
     end
 end
 
@@ -433,7 +429,7 @@ RegisterNetEvent('qb-truckerjob:client:Vehicle', function()
             lib.notify({ title = 'No Driver', description = Lang:t("error.no_driver"), duration = 5000, type = 'error' })
         end
     else
-        MenuGarage()
+        OpenMenuGarage()
     end
 end)
 
