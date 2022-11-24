@@ -1,6 +1,6 @@
 Config = {}
 
-Config.UseTarget = true
+Config.UseTarget = GetConvar('UseTarget', 'false') == 'true'
 
 Config.BailPrice = 250
 Config.MaxDrops = 10 -- amount of locations before being forced to return to station to reload
