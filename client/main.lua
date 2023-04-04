@@ -1,4 +1,4 @@
-local QBCore = exports['qb-core']:GetCoreObject()
+local QBCore = exports['qbx-core']:GetCoreObject()
 local PlayerJob = {}
 local JobsDone = 0
 local LocationsDone = {}
@@ -302,7 +302,7 @@ local function Deliver()
         if currentCount == CurrentLocation.dropcount then
             LocationsDone[#LocationsDone+1] = CurrentLocation.id
             TriggerServerEvent("qb-shops:server:RestockShopItems", CurrentLocation.store)
-            exports['qb-core']:HideText()
+            exports['qbx-core']:HideText()
             Delivering = false
             showMarker = false
             TriggerServerEvent('qb-trucker:server:nano')
@@ -372,7 +372,7 @@ RegisterNetEvent('QBCore:Client:OnJobUpdate', function(JobInfo)
     if OldPlayerJob == 'trucker' then
         RemoveTruckerBlips()
         zoneCombo:remove()
-        exports['qb-core']:HideText()
+        exports['qbx-core']:HideText()
         Delivering = false
         showMarker = false
     elseif PlayerJob.name == 'trucker' then
