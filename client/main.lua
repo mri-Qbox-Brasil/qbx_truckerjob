@@ -12,7 +12,6 @@ local TruckerBlip = nil
 local Delivering = false
 local showMarker = false
 local markerLocation
-local zoneCombo = nil
 local returningToStation = false
 
 -- Functions
@@ -362,14 +361,16 @@ RegisterNetEvent('QBCore:Client:OnPlayerUnload', function()
     JobsDone = 0
 end)
 
-RegisterNetEvent('QBCore:Client:OnJobUpdate', function(JobInfo)
+RegisterNetEvent('QBCore:Client:OnJobUpdate', function()
     RemoveTruckerBlips()
-    zoneCombo:remove()
+    if CurrentLocation and CurrentLocation.zoneCombo then
+    CurrentLocation.zoneCombo:remove()
     Delivering = false
     showMarker = false
     
     if QBX.PlayerData.job.name ~= 'trucker' then return end
     CreateElements()
+    end
 end)
 
 RegisterNetEvent('qbx_truckerjob:client:SpawnVehicle', function()
