@@ -13,4 +13,4 @@ jobs:
       - uses: actions/add-to-project@v0.5.0
         with:
           project-url: https://github.com/orgs/Qbox-project/projects/4
-          github-token: ${{ secrets.PROJECTS_PAT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
