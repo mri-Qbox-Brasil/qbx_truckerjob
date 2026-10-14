@@ -1,47 +1,50 @@
 local config = require 'config.client'
 local sharedConfig = require 'config.shared'
-local jobsDone = 0
-local locationsDone = {}
 local currentZones = {}
 local currentLocation = {}
 local currentBlip = 0
 local hasBox = false
-local isWorking = false
-local currentCount = 0
-local currentPlate = nil
-local selectedVeh = nil
 local truckVehBlip = 0
 local truckerBlip = 0
-local delivering = false
-local showMarker = false
-local markerLocation
 local returningToStation = false
+local currentPlate
+local boxObject
+local boxModel = `hei_prop_heist_box`
+local boxAnimDict = 'anim@heists@box_carry@'
+
+local function stopCarryingBox()
+    if boxObject and DoesEntityExist(boxObject) then DeleteEntity(boxObject) end
+    boxObject = nil
+    hasBox = false
+    StopAnimTask(cache.ped, boxAnimDict, 'idle', 1.0)
+end
+
+local function playBoxAnimation()
+    lib.playAnim(cache.ped, boxAnimDict, 'idle', 8.0, -8.0, -1, 49, 0, false, false, false)
+end
+
+local function startCarryingBox()
+    stopCarryingBox()
+    lib.requestModel(boxModel)
+    local coords = GetEntityCoords(cache.ped)
+    boxObject = CreateObject(boxModel, coords.x, coords.y, coords.z, true, true, false)
+    SetModelAsNoLongerNeeded(boxModel)
+    if not DoesEntityExist(boxObject) then
+        boxObject = nil
+        return false
+    end
+
+    AttachEntityToEntity(boxObject, cache.ped, GetPedBoneIndex(cache.ped, 60309),
+        0.025, 0.08, 0.255, -145.0, 290.0, 0.0, true, true, false, true, 1, true)
+    playBoxAnimation()
+    hasBox = true
+    return true
+end
 
 -- Functions
-
 local function returnToStation()
     SetBlipRoute(truckVehBlip, true)
     returningToStation = true
-end
-
-local function hasDoneLocation(locationId)
-    if locationsDone and table.type(locationsDone) ~= "empty" then
-        for _, v in pairs(locationsDone) do
-            if v == locationId then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-local function getNextLocation()
-    local current = 1
-    while hasDoneLocation(current) do
-        current = math.random(#sharedConfig.locations.stores)
-    end
-
-    return current
 end
 
 local function isTruckerVehicle(vehicle)
@@ -65,11 +68,46 @@ local function removeElements()
         currentBlip = 0
     end
 
-    for i = 1, #currentZones do
-        currentZones[i]:remove()
+    for _, zone in ipairs(currentZones) do
+        zone:remove()
     end
 
     currentZones = {}
+end
+
+local function getPaid()
+    TriggerServerEvent('qbx_truckerjob:server:getPaid')
+
+    if DoesBlipExist(currentBlip) then
+        RemoveBlip(currentBlip)
+        ClearAllBlipRoutes()
+        currentBlip = 0
+    end
+end
+
+local function returnVehicle()
+    if cache.seat ~= -1 then
+        return exports.qbx_core:Notify(locale('error.no_driver'), 'error')
+    end
+
+    if not isTruckerVehicle(cache.vehicle) then
+        return exports.qbx_core:Notify(locale('error.vehicle_not_correct'), 'error')
+    end
+
+    DeleteVehicle(cache.vehicle)
+    TriggerServerEvent('qbx_truckerjob:server:returnVehicle')
+
+    if DoesBlipExist(currentBlip) then
+        RemoveBlip(currentBlip)
+        ClearAllBlipRoutes()
+        currentBlip = 0
+    end
+
+    if not returningToStation and not next(currentLocation) then return end
+
+    ClearAllBlipRoutes()
+    returningToStation = false
+    exports.qbx_core:Notify(locale('mission.job_completed'), 'success')
 end
 
 local function openMenuGarage()
@@ -77,221 +115,195 @@ local function openMenuGarage()
     for k in pairs(config.vehicles) do
         truckMenu[#truckMenu + 1] = {
             title = config.vehicles[k],
-            event = "qbx_truckerjob:client:takeOutVehicle",
-            args = {
-                vehicle = k
-            }
+            serverEvent = 'qbx_truckerjob:server:doBail',
+            args = k
         }
     end
 
     lib.registerContext({
         id = 'trucker_veh_menu',
-        title = locale("menu.header"),
+        title = locale('menu.header'),
         options = truckMenu
     })
 
     lib.showContext('trucker_veh_menu')
 end
 
-local function setDelivering(active)
-    if QBX.PlayerData.job.name ~= 'trucker' then return end
-    delivering = active
-end
-
-local function setShowMarker(active)
-    if QBX.PlayerData.job.name ~= 'trucker' then return end
-    showMarker = active
-end
-
-local function createZone(type, number)
-    if QBX.PlayerData.job.name ~= 'trucker' then return end
-
-    local coords
-    local size
-    local rotation
-    local boxName
-    local icon
-    local debug
-
-    for k, v in pairs(sharedConfig.locations) do
-        if k == type then
-            if type == 'stores' then
-                coords = v[number].coords
-                size = v[number].size
-                rotation = v[number].rotation
-                boxName = v[number].label
-                debug = v[number].debug
-            else
-                coords = v.coords
-                size = v.size
-                rotation = v.rotation
-                boxName = v.label
-                icon = v.icon
-                debug = v.debug
-            end
-        end
-    end
-
-    if config.useTarget and type == 'main' then
-        exports.ox_target:addBoxZone({
-            coords = coords,
-            size = size,
-            rotation = rotation,
-            debug = debug,
-            options = {
-                {
-                    name = boxName,
-                    event = 'qbx_truckerjob:client:paycheck',
-                    icon = icon,
-                    label = boxName,
-                    distance = 2,
-                    canInteract = function()
-                        return QBX.PlayerData.job.name == 'trucker'
-                    end
-                }
+local function createMainTarget()
+    local location = sharedConfig.locations.main;
+    currentZones[#currentZones + 1] = exports.ox_target:addBoxZone({
+        coords = location.coords,
+        size = location.size,
+        rotation = location.rotation,
+        debug = debug,
+        options = {
+            {
+                name = location.label,
+                onSelect = function()
+                    getPaid()
+                end,
+                icon = location.icon,
+                label = location.label,
+                distance = 2,
+                canInteract = function()
+                    return QBX.PlayerData.job.name == 'trucker'
+                end
             }
-        })
-    else
-        local boxZone = lib.zones.box({
-            name = boxName,
-            coords = coords,
-            size = size,
-            rotation = rotation,
-            debug = debug,
-            onEnter = function()
-                if QBX.PlayerData.job.name ~= 'trucker' then return end
-
-                if type == 'main' then
-                    lib.showTextUI(locale('info.pickup_paycheck'))
-                elseif type == 'vehicle' then
-                    if cache.vehicle then
-                        lib.showTextUI(locale('info.store_vehicle'))
-                    else
-                        lib.showTextUI(locale('info.vehicles'))
-                    end
-                    markerLocation = coords
-                    setShowMarker(true)
-                elseif type == 'stores' then
-                    markerLocation = coords
-                    exports.qbx_core:Notify(locale('mission.store_reached'), 'info', 5000)
-                    setShowMarker(true)
-                    setDelivering(true)
-                end
-            end,
-            inside = function()
-                if QBX.PlayerData.job.name ~= 'trucker' then return end
-
-                if type == 'main' then
-                    if IsControlJustReleased(0, 38) then
-                        TriggerEvent('qbx_truckerjob:client:paycheck')
-                    end
-                elseif type == 'vehicle' then
-                    if IsControlJustReleased(0, 38) then
-                        TriggerEvent('qbx_truckerjob:client:vehicle')
-                    end
-                end
-            end,
-            onExit = function()
-                if QBX.PlayerData.job.name ~= 'trucker' then return end
-
-                if type == 'main' then
-                    lib.hideTextUI()
-                elseif type == 'vehicle' then
-                    setShowMarker(false)
-                    lib.hideTextUI()
-                elseif type == 'stores' then
-                    setShowMarker(false)
-                    setDelivering(false)
-                end
-            end
-        })
-
-        if type == 'stores' then
-            currentLocation.zoneCombo = boxZone
-        else
-            currentZones[#currentZones + 1] = boxZone
-        end
-    end
-end
-
-local function getNewLocation()
-    local location = getNextLocation()
-    if location ~= 0 then
-        currentLocation = {
-            id = location,
-            dropcount = math.random(1, 3),
-            store = sharedConfig.locations.stores[location].label,
-            coords = sharedConfig.locations.stores[location].coords
         }
-
-        createZone('stores', location)
-
-        currentBlip = AddBlipForCoord(currentLocation.coords.x, currentLocation.coords.y, currentLocation.coords.z)
-        SetBlipColour(currentBlip, 3)
-        SetBlipRoute(currentBlip, true)
-        SetBlipRouteColour(currentBlip, 3)
-    else
-        exports.qbx_core:Notify(locale('success.payslip_time'), 'success', 5000)
-        if DoesBlipExist(currentBlip) then
-            RemoveBlip(currentBlip)
-            ClearAllBlipRoutes()
-            currentBlip = 0
-        end
-    end
+    })
 end
 
-local function createElements()
-    truckVehBlip = AddBlipForCoord(sharedConfig.locations.vehicle.coords.x, sharedConfig.locations.vehicle.coords.y, sharedConfig.locations.vehicle.coords.z)
-    SetBlipSprite(truckVehBlip, 326)
-    SetBlipDisplay(truckVehBlip, 4)
-    SetBlipScale(truckVehBlip, 0.6)
-    SetBlipAsShortRange(truckVehBlip, true)
-    SetBlipColour(truckVehBlip, 5)
-    BeginTextCommandSetBlipName("STRING")
-    AddTextComponentSubstringPlayerName(sharedConfig.locations.vehicle.label)
-    EndTextCommandSetBlipName(truckVehBlip)
+local function createMainZone()
+    local location = sharedConfig.locations.main;
 
-    truckerBlip = AddBlipForCoord(sharedConfig.locations.main.coords.x, sharedConfig.locations.main.coords.y, sharedConfig.locations.main.coords.z)
-    SetBlipSprite(truckerBlip, 479)
-    SetBlipDisplay(truckerBlip, 4)
-    SetBlipScale(truckerBlip, 0.6)
-    SetBlipAsShortRange(truckerBlip, true)
-    SetBlipColour(truckerBlip, 5)
-    BeginTextCommandSetBlipName("STRING")
-    AddTextComponentSubstringPlayerName(sharedConfig.locations.main.label)
-    EndTextCommandSetBlipName(truckerBlip)
+    local zone = lib.zones.sphere({
+        coords = location.coords,
+        radius = location.markerRadius,
+        debug = location.debug
+    })
 
-    createZone('main')
-    createZone('vehicle')
+    local innerZone = lib.zones.sphere({
+        coords = location.coords,
+        radius = location.interactionsRadius,
+        debug = location.debug
+    })
+
+    local marker = lib.marker.new({
+        coords = location.coords,
+        type = location.markerType,
+        height = 0.2,
+        width = 0.3
+    })
+
+    function zone:inside()
+        marker:draw()
+    end
+
+    function innerZone:onEnter()
+        if not lib.isTextUIOpen() then
+            lib.showTextUI(locale('info.pickup_paycheck'))
+        end
+    end
+
+    function innerZone:inside()
+        if IsControlJustPressed(0, 38) then
+            getPaid()
+        end
+    end
+
+    function innerZone:onExit()
+        local isOpen, currentText = lib.isTextUIOpen()
+        if isOpen and currentText == locale('info.pickup_paycheck') then
+            lib.hideTextUI()
+        end
+    end
+
+    currentZones[#currentZones + 1] = zone
+    currentZones[#currentZones + 1] = innerZone
+end
+
+local createMain = config.useTarget and createMainTarget or createMainZone
+
+local function createVehicleZone()
+    local location = sharedConfig.locations.vehicle;
+
+    local zone = lib.zones.sphere({
+        coords = location.coords,
+        radius = location.markerRadius,
+        debug = location.debug
+    })
+
+    local innerZone = lib.zones.sphere({
+        coords = location.coords,
+        radius = location.interactionsRadius,
+        debug = location.debug
+    })
+
+    local marker = lib.marker.new({
+        coords = location.coords,
+        type = location.markerType,
+        height = 0.2,
+        width = 0.3
+    })
+
+    local function hideTextUI()
+        local isOpen, currentText = lib.isTextUIOpen()
+        if isOpen and (currentText == locale('info.store_vehicle') or currentText == locale('info.vehicles')) then
+            lib.hideTextUI()
+        end
+    end
+
+    function zone:inside()
+        marker:draw()
+    end
+
+    function innerZone:onEnter()
+        if not lib.isTextUIOpen() then
+            lib.showTextUI(locale(cache.vehicle and 'info.store_vehicle' or 'info.vehicles'))
+        end
+    end
+
+    local isChangeTextAllowed = false
+    function innerZone:inside()
+        ---This section updates the textui when the client uses the garage.
+        if isChangeTextAllowed then
+            local _, currentText = lib.isTextUIOpen()
+            local expectedText = locale(cache.vehicle and 'info.store_vehicle' or 'info.vehicles')
+            if currentText ~= expectedText and not lib.getOpenContextMenu() then
+                isChangeTextAllowed = false
+                CreateThread(function()
+                    Wait(1000)
+                    lib.showTextUI(locale(cache.vehicle and 'info.store_vehicle' or 'info.vehicles'))
+                end)
+            end
+        end
+        ---
+
+        if IsControlJustPressed(0, 38) then
+            if cache.vehicle then
+                returnVehicle()
+            else
+                openMenuGarage()
+            end
+
+            hideTextUI()
+            isChangeTextAllowed = true
+        end
+    end
+
+    function innerZone:onExit()
+        hideTextUI()
+    end
+
+    currentZones[#currentZones + 1] = zone
+    currentZones[#currentZones + 1] = innerZone
 end
 
 local function areBackDoorsOpen(vehicle) -- This is hardcoded for the rumpo currently
-    return GetVehicleDoorAngleRatio(vehicle, 5) > 0.0 or GetVehicleDoorAngleRatio(vehicle, 2) > 0.0 and GetVehicleDoorAngleRatio(vehicle, 3) > 0.0
+    return GetVehicleDoorAngleRatio(vehicle, 5) > 0.0
+        or GetVehicleDoorAngleRatio(vehicle, 2) > 0.0
+        and GetVehicleDoorAngleRatio(vehicle, 3) > 0.0
 end
 
 local function getInTrunk()
     if cache.vehicle then
-        return exports.qbx_core:Notify(locale('error.get_out_vehicle'), 'error', 5000)
+        return exports.qbx_core:Notify(locale('error.get_out_vehicle'), 'error')
     end
 
-    local pos = GetEntityCoords(cache.ped, true)
     local vehicle = GetVehiclePedIsIn(cache.ped, true)
     if not isTruckerVehicle(vehicle) or currentPlate ~= qbx.getVehiclePlate(vehicle) then
-        return exports.qbx_core:Notify(locale('error.vehicle_not_correct'), 'error', 5000)
+        return exports.qbx_core:Notify(locale('error.vehicle_not_correct'), 'error')
     end
 
     if not areBackDoorsOpen(vehicle) then
-        return exports.qbx_core:Notify(locale('error.backdoors_not_open'), 'error', 5000)
+        return exports.qbx_core:Notify(locale('error.backdoors_not_open'), 'error')
     end
 
-    local trunkpos = GetOffsetFromEntityInWorldCoords(vehicle, 0, -2.5, 0)
-    if #(pos - trunkpos) > 1.5 then
-        return exports.qbx_core:Notify(locale('error.too_far_from_trunk'), 'error', 5000)
+    local pedCoords = GetEntityCoords(cache.ped, true)
+    local trunkCoords = GetOffsetFromEntityInWorldCoords(vehicle, 0, -2.5, 0)
+    if #(pedCoords - trunkCoords) > 1.5 then
+        return exports.qbx_core:Notify(locale('error.too_far_from_trunk'), 'error')
     end
-
-    if isWorking then return end
-
-    isWorking = true
 
     if lib.progressCircle({
         duration = 2000,
@@ -309,20 +321,14 @@ local function getInTrunk()
             clip = 'hotwire'
         },
     }) then
-        isWorking = false
-        StopAnimTask(cache.ped, "anim@gangops@facility@servers@", "hotwire", 1.0)
-        exports.scully_emotemenu:playEmoteByCommand('box')
-        hasBox = true
-        exports.qbx_core:Notify(locale('info.deliver_to_store'), 'info', 5000)
+        if not startCarryingBox() then return exports.qbx_core:Notify(locale('error.cancelled'), 'error') end
+        exports.qbx_core:Notify(locale('info.deliver_to_store'), 'info')
     else
-        isWorking = false
-        StopAnimTask(cache.ped, "anim@gangops@facility@servers@", "hotwire", 1.0)
-        exports.qbx_core:Notify(locale('error.cancelled'), 'error', 5000)
+        exports.qbx_core:Notify(locale('error.cancelled'), 'error')
     end
 end
 
 local function deliver()
-    isWorking = true
     if lib.progressCircle({
         duration = 3000,
         position = 'bottom',
@@ -339,16 +345,11 @@ local function deliver()
             clip = 'hotwire'
         },
     }) then
-        isWorking = false
-        StopAnimTask(cache.ped, "anim@gangops@facility@servers@", "hotwire", 1.0)
-        exports.scully_emotemenu:cancelEmote()
+        stopCarryingBox()
         ClearPedTasks(cache.ped)
-        hasBox = false
-        currentCount += 1
-        if currentCount == currentLocation.dropcount then
-            locationsDone[#locationsDone + 1] = currentLocation.id
-            delivering = false
-            showMarker = false
+        currentLocation.currentCount += 1
+        lib.print.debug('count:', currentLocation.currentCount, '/', currentLocation.dropCount)
+        if currentLocation.currentCount == currentLocation.dropCount then
             if DoesBlipExist(currentBlip) then
                 RemoveBlip(currentBlip)
                 ClearAllBlipRoutes()
@@ -356,171 +357,145 @@ local function deliver()
             end
             currentLocation.zoneCombo:remove()
             currentLocation = {}
-            currentCount = 0
-            jobsDone += 1
-            if jobsDone == config.maxDrops then
-                exports.qbx_core:Notify(locale('mission.return_to_station'), 'info', 5000)
-                returnToStation()
-            else
-                TriggerServerEvent("qbx_truckerjob:server:doneJob")
-                exports.qbx_core:Notify(locale('mission.goto_next_point'), 'info', 5000)
-                getNewLocation()
-            end
-        elseif currentCount ~= currentLocation.dropcount then
-            exports.qbx_core:Notify(locale('mission.another_box'), 'info', 5000)
+
+            return true
         else
-            isWorking = false
-            ClearPedTasks(cache.ped)
-            StopAnimTask(cache.ped, "anim@gangops@facility@servers@", "hotwire", 1.0)
-            exports.scully_emotemenu:cancelEmote()
-            exports.qbx_core:Notify(locale('error.cancelled'), 'error', 5000)
+            exports.qbx_core:Notify(locale('mission.another_box'), 'info')
         end
+    else
+        ClearPedTasks(cache.ped)
+        playBoxAnimation()
+        exports.qbx_core:Notify(locale('error.cancelled'), 'error')
     end
+end
+
+local function getNewLocation(locationIndex, drop)
+    local location = sharedConfig.locations.stores[locationIndex]
+    currentLocation = { dropCount = drop, currentCount = 0 }
+
+    local marker = lib.marker.new({
+        coords = location.coords,
+        type = location.markerType or 2,
+        height = 0.2,
+        width = 0.3
+    })
+
+    currentLocation.zoneCombo = lib.zones.box({
+        name = location.label,
+        coords = location.coords,
+        size = location.size,
+        rotation = location.rotation,
+        debug = location.debug,
+        onEnter = function()
+            exports.qbx_core:Notify(locale('mission.store_reached'), 'info')
+        end,
+        inside = function ()
+            marker:draw()
+
+            if IsControlJustReleased(0, 38) then
+                if cache.vehicle then
+                    return exports.qbx_core:Notify(locale('error.get_out_vehicle'), 'error')
+                elseif not hasBox then
+                    getInTrunk()
+                elseif #(GetEntityCoords(cache.ped) - location.coords) < 5 then
+                    if deliver() then
+                        local newLocation, newDrop = lib.callback.await('qbx_truckerjob:server:getNewTask', false)
+                        if not newLocation or QBX.PlayerData.job.name ~= 'trucker' then return
+                        elseif newLocation == 0 then
+                            exports.qbx_core:Notify(locale('mission.return_to_station'), 'info')
+                            returnToStation()
+                        else
+                            exports.qbx_core:Notify(locale('mission.goto_next_point'), 'info')
+                            getNewLocation(newLocation, newDrop)
+                        end
+                    end
+                else
+                    exports.qbx_core:Notify(locale('error.too_far_from_delivery'), 'error')
+                end
+            end
+        end,
+    })
+
+    currentBlip = AddBlipForCoord(location.coords.x, location.coords.y, location.coords.z)
+    SetBlipColour(currentBlip, 3)
+    SetBlipRoute(currentBlip, true)
+    SetBlipRouteColour(currentBlip, 3)
+end
+
+local function createElement(location, sprinteId)
+    local element = AddBlipForCoord(location.coords.x, location.coords.y, location.coords.z)
+    SetBlipSprite(element, sprinteId)
+    SetBlipDisplay(element, 4)
+    SetBlipScale(element, 0.6)
+    SetBlipAsShortRange(element, true)
+    SetBlipColour(element, 5)
+    BeginTextCommandSetBlipName('STRING')
+    AddTextComponentSubstringPlayerName(location.label)
+    EndTextCommandSetBlipName(element)
+
+    return element
+end
+
+local function createElements()
+    if QBX.PlayerData.job.name ~= 'trucker' then return end
+
+    truckVehBlip = createElement(sharedConfig.locations.vehicle, 326)
+    truckerBlip = createElement(sharedConfig.locations.main, 479)
+
+    createMain()
+    createVehicleZone()
 end
 
 -- Events
 
-AddEventHandler('onResourceStart', function(resource)
-    if resource ~= GetCurrentResourceName() then return end
-
+local function setInitState()
+    stopCarryingBox()
     removeElements()
     currentLocation = {}
     currentBlip = 0
     hasBox = false
-    isWorking = false
-    jobsDone = 0
+end
 
-    if QBX.PlayerData.job.name ~= 'trucker' then return end
+AddEventHandler('onResourceStart', function(resource)
+    if resource ~= GetCurrentResourceName() then return end
 
+    setInitState()
     createElements()
 end)
 
 RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
-    removeElements()
-    currentLocation = {}
-    currentBlip = 0
-    hasBox = false
-    isWorking = false
-    jobsDone = 0
-
-    if QBX.PlayerData.job.name ~= 'trucker' then return end
-
+    setInitState()
     createElements()
 end)
 
 RegisterNetEvent('QBCore:Client:OnPlayerUnload', function()
-    removeElements()
-    currentLocation = {}
-    currentBlip = 0
-    hasBox = false
-    isWorking = false
-    jobsDone = 0
+    setInitState()
 end)
 
 RegisterNetEvent('QBCore:Client:OnJobUpdate', function()
+    stopCarryingBox()
     removeElements()
 
-    if table.type(currentLocation) ~= 'empty' and currentLocation.zoneCombo then
+    if next(currentLocation) and currentLocation.zoneCombo then
         currentLocation.zoneCombo:remove()
-        delivering = false
-        showMarker = false
     end
-
-    if QBX.PlayerData.job.name ~= 'trucker' then return end
 
     createElements()
 end)
 
-RegisterNetEvent('qbx_truckerjob:client:spawnVehicle', function()
-    local netId, plate = lib.callback.await('qbx_truckerjob:server:spawnVehicle', false, selectedVeh)
-    local veh = NetToVeh(netId)
-    SetVehicleNumberPlateText(veh, plate)
-    SetVehicleLivery(veh, 1)
-    SetVehicleColours(veh, 122, 122)
-    SetVehicleEngineOn(veh, true, true, false)
-    currentPlate = qbx.getVehiclePlate(veh)
-    getNewLocation()
+AddEventHandler('onResourceStop', function(resource)
+    if resource == cache.resource then stopCarryingBox() end
 end)
 
-RegisterNetEvent('qbx_truckerjob:client:takeOutVehicle', function(data)
-    local vehicleInfo = data.vehicle
-    TriggerServerEvent('qbx_truckerjob:server:doBail', true, vehicleInfo)
-    selectedVeh = vehicleInfo
-end)
+RegisterNetEvent('qbx_truckerjob:client:spawnVehicle', function(veh)
+    local netId, plate = lib.callback.await('qbx_truckerjob:server:spawnVehicle', false, veh)
+    if not netId then return end
+    currentPlate = plate
+    local vehicle = NetToVeh(netId)
+    SetVehicleEngineOn(vehicle, true, true, false)
 
-RegisterNetEvent('qbx_truckerjob:client:vehicle', function()
-    if not cache.vehicle then
-        return openMenuGarage()
-    end
+    local location, drop = lib.callback.await('qbx_truckerjob:server:getNewTask', false, true)
 
-    if cache.seat ~= -1 then
-        return exports.qbx_core:Notify(locale('error.no_driver'), 'error', 5000)
-    end
-
-    if not isTruckerVehicle(cache.vehicle) then
-        return exports.qbx_core:Notify(locale('error.vehicle_not_correct'), 'error', 5000)
-    end
-
-    DeleteVehicle(cache.vehicle)
-    TriggerServerEvent('qbx_truckerjob:server:doBail', false)
-
-    if DoesBlipExist(currentBlip) then
-        RemoveBlip(currentBlip)
-        ClearAllBlipRoutes()
-        currentBlip = 0
-    end
-
-    if not returningToStation and table.type(currentLocation) == 'empty' then return end
-
-    ClearAllBlipRoutes()
-    returningToStation = false
-    exports.qbx_core:Notify(locale('mission.job_completed'), 'success', 5000)
-end)
-
-RegisterNetEvent('qbx_truckerjob:client:paycheck', function()
-    if jobsDone == 0 then
-        return exports.qbx_core:Notify(locale('error.no_work_done'), 'error', 2500)
-    end
-
-    TriggerServerEvent("qbx_truckerjob:server:getPaid")
-    jobsDone = 0
-
-    if #locationsDone == #sharedConfig.locations.stores then
-        locationsDone = {}
-    end
-
-    if not DoesBlipExist(currentBlip) then return end
-
-    RemoveBlip(currentBlip)
-    ClearAllBlipRoutes()
-    currentBlip = 0
-end)
-
--- Threads
-
-CreateThread(function()
-    local sleep
-    while true do
-        sleep = 1000
-        if showMarker then
-            sleep = 0
-            ---@diagnostic disable-next-line: param-type-mismatch
-            DrawMarker(2, markerLocation.x, markerLocation.y, markerLocation.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.2, 0.15, 200, 0, 0, 222, false, false, 0, true, nil, nil, false)
-        end
-        if delivering then
-            sleep = 0
-            if IsControlJustReleased(0, 38) then
-                if not hasBox then
-                    getInTrunk()
-                else
-                    if #(GetEntityCoords(cache.ped) - markerLocation) < 5 then
-                        deliver()
-                    else
-                        exports.qbx_core:Notify(locale('error.too_far_from_delivery'), 'error', 5000)
-                    end
-                end
-            end
-        end
-        Wait(sleep)
-    end
+    if not location then return end
+    getNewLocation(location, drop)
 end)
