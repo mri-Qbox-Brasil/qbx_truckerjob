@@ -8,7 +8,8 @@
         "backdoors_not_open": "As portas traseiras do veículo não estão abertas",
         "get_out_vehicle": "Você precisa sair do veículo para realizar esta ação",
         "too_far_from_trunk": "Você precisa pegar as caixas do porta-malas do seu veículo",
-        "too_far_from_delivery": "Você precisa estar mais perto do ponto de entrega"
+        "too_far_from_delivery": "Você precisa estar mais perto do ponto de entrega",
+        "too_many_rents": "Você alugou um carro recentemente, volte em alguns minutos"
     },
     "success": {
         "paid_with_cash": "Depósito de R$%s pago em dinheiro",
